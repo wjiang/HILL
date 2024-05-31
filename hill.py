@@ -2562,7 +2562,7 @@ def fit_spline(_disp_col,data,xs,ys,apix,display=False):
 def filament_straighten(_disp_col,data,tck,new_xs,ys,r_filament_pixel_display,apix):
     ny,nx=data.shape
     # resample pixels
-    st.info(tck)
+    #st.info(tck)
     y0=0
     x0=splev(y0,tck)
     for i in range(ny):
@@ -2576,7 +2576,7 @@ def filament_straighten(_disp_col,data,tck,new_xs,ys,r_filament_pixel_display,ap
             1 + orthog_dxdy * orthog_dxdy) + x0
         new_row_ys=rev_normal_x0y0(new_row_xs)
         y0=y0+np.sqrt((1-dxdy*dxdy))
-        st.info(dxdy)
+        #st.info(dxdy)
         x0=splev(y0,tck)
 
     # interpolate resampled pixles
