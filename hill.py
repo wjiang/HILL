@@ -1109,7 +1109,9 @@ def obtain_input_image(column, param_i=0, image_index_sync=0):
             msg += f' | resolution={resolution}Å'
             params = get_emdb_helical_parameters(emd_id)
             if params and ("twist" in params and "rise" in params and "csym" in params):                
-                msg += f"  \ntwist={params['twist']}° | rise={params['rise']}Å | c{params['csym']}"
+                msg += f"  \ntwist={params['twist']}° | rise={params['rise']}Å"
+                if params.get("csym_known", True): msg += f" | c{params['csym']}"
+                else: msg += " | csym n/a"
                 st.session_state[f"input_type_{param_i}"] = "image"
                 #if "twist" not in st.session_state and "rise" not in st.session_state:
                 if emd_id != st.session_state['prev_emdid']:
@@ -1117,8 +1119,7 @@ def obtain_input_image(column, param_i=0, image_index_sync=0):
                     st.session_state['rise'] = params['rise']
                     st.session_state['twist'] = params['twist']
                     st.session_state['pitch'] = twist2pitch(twist=st.session_state.twist, rise=st.session_state.rise)
-                    st.session_state['csym'] = params['csym']
-                    
+                    st.session_state['csym'] = params['csym']                    
             else:
                 msg +=  "  \n*helical params not available*"
             st.markdown(msg)
@@ -1131,7 +1132,7 @@ def obtain_input_image(column, param_i=0, image_index_sync=0):
                     msg_map_too_large = f"As the map size ({map_size:.1f} MB, {nx}x{ny}x{nz} voxels) is too large for the resource limit ({mem_quota():.1f} MB memory cap) of the hosting service, HILL will stop analyzing it to avoid crashing the server. Please bin/crop your map so that it is {max_map_size} MB ({max_map_dim}x{max_map_dim}x{max_map_dim} voxels) or less, and then try again. Please check the [HILL web site](https://jiang.bio.purdue.edu/hill) to learn how to run HILL on your local computer with larger memory to support large maps"
                     st.warning(msg_map_too_large)
                     st.stop()
-            data_all, apix_auto = get_emdb_map(emd_id)
+            data_all, map_crs_auto, apix_auto = get_emdb_map(emd_id)
             if data_all is None:
                 st.warning(f"Failed to download [EMD-{emd_id}](https://www.ebi.ac.uk/emdb/entry/EMD-{emd_id})")
                 return
@@ -1151,7 +1152,7 @@ def obtain_input_image(column, param_i=0, image_index_sync=0):
                 if fileobj is not None:
                     is_pwr_auto = fileobj.name.find("ps.mrcs")!=-1
                     is_pd_auto = fileobj.name.find("pd.mrcs")!=-1
-                    data_all, apix_auto = get_2d_image_from_uploaded_file(fileobj)
+                    data_all, map_crs_auto, apix_auto = get_2d_image_from_uploaded_file(fileobj)
                     is_3d_auto = guess_if_3d(filename=fileobj.name, data=data_all)
                 else:
                     st.stop()
@@ -1165,13 +1166,30 @@ def obtain_input_image(column, param_i=0, image_index_sync=0):
                     image_url = st.text_input(label=label, help=help, key=key_image_url).strip()
                     is_pwr_auto = image_url.find("ps.mrcs")!=-1
                     is_pd_auto = image_url.find("pd.mrcs")!=-1
-                    data_all, apix_auto = get_2d_image_from_url(image_url)
+                    data_all, map_crs_auto, apix_auto = get_2d_image_from_url(image_url)
                     is_3d_auto = guess_if_3d(filename=image_url, data=data_all)
             nz, ny, nx = data_all.shape
             if nz > 1:
                 is_3d = st.checkbox(label=f"The input ({nx}x{ny}x{nz}) is a 3D map", value=is_3d_auto, key=f'is_3d_{param_i}', help="The app thinks the input image contains a stack of 2D images. Check this box to inform the app that the input is a 3D map")
             else:
                 is_3d = False
+
+        if map_crs_auto != [1, 2, 3]:
+            map_crs_to_xyz = {1:'x', 2:'y', 3:'z'}
+            xyz = ','.join([map_crs_to_xyz[int(i)] for i in map_crs_auto])
+            label = f":red[Change map axes order from {xyz} to:]"
+            key_target_map_axes_order = f"target_map_axes_order_{param_i}"
+            st.text_input(label=label, value="x,y,z", max_chars=5, help=f"Cryo-EM field assumes that the map axes are in the order of x,y,z (e.g. MRC/CCP4 header fields mapc=1, mapr=2, maps=3). However, you map header has a different order {xyz} (mapc={map_crs_auto[0]}, mapr={map_crs_auto[1]}, maps={map_crs_auto[2]})", key=key_target_map_axes_order)
+            try:
+                target_map_axes_order = st.session_state[key_target_map_axes_order].lower().split(",")
+                assert len(target_map_axes_order) == 3
+                xyz_to_map_crs = {'x':1, 'y':2, 'z':3}
+                target_map_crs = [xyz_to_map_crs[a] for a in target_map_axes_order]
+            except:
+                st.warning(f"Incorrect value {st.session_state[key_target_map_axes_order]}. I will use the default value x,y,z")
+                target_map_crs = [1, 2, 3]
+            data_all = change_mrc_map_crs_order(data=data_all, current_order=map_crs_auto, target_order=target_map_crs)
+
         if is_3d:
             if not np.any(data_all):
                 st.warning("All voxels of the input 3D map have zero value")
@@ -1974,8 +1992,8 @@ def get_2d_image_from_uploaded_file(fileobj):
     suffix = os.path.splitext(original_filename)[-1]
     with tempfile.NamedTemporaryFile(suffix=suffix) as temp:
         temp.write(fileobj.read())
-        data, apix = get_2d_image_from_file(temp.name)
-    return data.astype(np.float32), apix
+        data, map_crs, apix = get_2d_image_from_file(temp.name)
+    return data.astype(np.float32), map_crs, apix
 
 @st.cache_data(show_spinner=False, ttl=24*60*60.) # refresh every day
 def get_emdb_ids():
@@ -2004,7 +2022,13 @@ def get_emdb_helical_parameters(emd_id):
     if emdb_helical is not None and emd_id in emdb_ids_helical:
         row_index = emdb_helical.index[emdb_helical["emdb_id"] == emd_id].tolist()[0]
         row = emdb_helical.iloc[row_index]
-        ret = {"resolution":row.resolution, "twist":float(row.twist), "rise":float(row.rise), "csym":int(row.csym[1:])}
+        ret = {}
+        try:
+            csym = int(row.csym[1:])
+        except: 
+            csym = 1
+            ret["csym_known"] = False
+        ret.update({"resolution":row.resolution, "twist":float(row.twist), "rise":float(row.rise), "csym":csym})
     else:
         ret = {}
     return ret
@@ -2024,12 +2048,12 @@ def get_emdb_map(emd_id: str):
         st.error(f"ERROR: EMD-{emd_id} map ({url}) could not be downloaded")
         st.stop()
     #import mrcfile
-    with mrcfile.open(fileobj.name, mode='r+') as mrc:
-        change_mrc_axes_order(mrc, new_axes=["x", "y", "z"])
+    with mrcfile.open(fileobj.name, mode='r') as mrc:
+        map_crs = [int(mrc.header.mapc), int(mrc.header.mapr), int(mrc.header.maps)]
         vmin, vmax = np.min(mrc.data), np.max(mrc.data)
         data = ((mrc.data - vmin) / (vmax - vmin))
         apix = mrc.voxel_size.x.item()
-    return data.astype(np.float32), apix
+    return data.astype(np.float32), map_crs, apix
 
 @st.cache_data(persist='disk', max_entries=1, show_spinner=False)
 def get_2d_image_from_url(url):
@@ -2046,7 +2070,7 @@ def get_2d_image_from_file(filename):
     try:
         #import mrcfile
         with mrcfile.open(filename) as mrc:
-            change_mrc_axes_order(mrc, new_axes=["x", "y", "z"])
+            map_crs = [int(mrc.header.mapc), int(mrc.header.mapr), int(mrc.header.maps)]
             data = mrc.data.astype(np.float32)
             apix = mrc.voxel_size.x.item()
     except:
@@ -2054,6 +2078,7 @@ def get_2d_image_from_file(filename):
         data = imread(filename, as_gray=1) * 1.0    # return: numpy array
         data = data[::-1, :]
         apix = 1.0
+        map_crs = [1, 2, 3]
 
     if data.dtype==np.dtype('complex64'):
         data_complex = data
@@ -2064,7 +2089,7 @@ def get_2d_image_from_file(filename):
             data[i] = normalize(tmp, percentile=(0.1, 99.9))
     if len(data.shape)==2:
         data = np.expand_dims(data, axis=0)
-    return data.astype(np.float32), apix
+    return data.astype(np.float32), map_crs, apix
 
 def download_file_from_url(url):
     import tempfile
@@ -2095,18 +2120,14 @@ def get_file_size(url):
     else:
         return None
 
-def change_mrc_axes_order(mrc, new_axes=["x", "y", "z"]):
-    map_axes = {"x":0, "y":1, "z":2}
-    map_axes_reverse = {0:"x", 1:"y", 2:"z"}
-    current_axes_int = [ mrc.header.mapc-1, mrc.header.mapr-1, mrc.header.maps-1 ]
-    new_axes_int = [ map_axes[a] for a in new_axes ]
-    if current_axes_int == new_axes_int: return
-    st.warning(f"The map axes order was {','.join([map_axes_reverse[a] for a in current_axes_int])}. It has now been changed to x,y,z")
-    mrc.set_data( np.moveaxis(mrc.data, current_axes_int, new_axes_int) )
-    mrc.header.mapc = map_axes[new_axes[0]]
-    mrc.header.mapr = map_axes[new_axes[1]]
-    mrc.header.maps = map_axes[new_axes[2]]
-    return
+def change_mrc_map_crs_order(data, current_order, target_order=[1, 2, 3]):
+    if current_order == target_order: return data
+    map_crs_to_np_axes = {1:2, 2:1, 3:0}
+    current_np_axes_order = [map_crs_to_np_axes[int(i)] for i in current_order]
+    target_np_axes_order = [map_crs_to_np_axes[int(i)] for i in target_order]
+    import numpy as np
+    ret = np.moveaxis(data, current_np_axes_order, target_np_axes_order)
+    return ret
 
 def twist2pitch(twist, rise):
     if twist:
@@ -2358,7 +2379,6 @@ def qr_code(url=None, size = 8):
 def read_mrc_data(mrc):
     # read mrc data
     mrc_data = mrcfile.open(mrc, 'r+')
-    change_mrc_axes_order(mrc_data, new_axes=["x", "y", "z"])
     mrc_data.set_image_stack
 
     v_size=mrc_data.voxel_size
